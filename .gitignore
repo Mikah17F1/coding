@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+fastf1_cache/
+outputs/
