@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+*.log
 fastf1_cache/
 outputs/
 _archived_before_clean_*/
