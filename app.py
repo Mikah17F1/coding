@@ -20,13 +20,29 @@ import streamlit as st
 from fastf1.core import Laps
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 from timple.timedelta import strftimedelta
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 CACHE_DIR = Path("fastf1_cache")
 KMH_TO_MPH = 0.621371
 TIME_COLUMNS = ["Q1", "Q2", "Q3"]
 TEAM_LOGO_DIR = Path("assets/team_logos")
+TEAM_BASE_LOGO_FILES = {
+    "alpine": ("commons", "Alpine A110 2017 Logo.svg"),
+    "aston martin": ("commons", "Astonmartinlogo.png"),
+    "audi": ("commons", "Audi-Logo_2016.svg"),
+    "cadillac": ("commons", "Cadillac Wordmark.svg"),
+    "ferrari": ("en", "Prancing horse.svg"),
+    "haas": ("commons", "Haas Automation Logo.png"),
+    "kick sauber": ("commons", "Sauber F1 Team logo.svg"),
+    "mclaren": ("commons", "McLaren Racing logo.png"),
+    "mercedes": ("commons", "Mercedes-Benz Star (1969-1986, 2025-).svg"),
+    "racing bulls": ("en", "VCARB F1 logo.svg"),
+    "rb": ("en", "VCARB F1 logo.svg"),
+    "red bull": ("commons", "Logo of Red bull.svg"),
+    "sauber": ("commons", "Sauber F1 Team logo.svg"),
+    "williams": ("commons", "Williams Racing 2022 logo.svg"),
+}
 TEAM_WIKI_TITLES = {
     "alpine": "Alpine F1 Team",
     "aston martin": "Aston Martin F1 Team",
@@ -623,7 +639,7 @@ def corner_ranking_graphic(
         speed_mph = float(row["Average Speed"]) * KMH_TO_MPH
         min_mph = float(row["Minimum Speed"]) * KMH_TO_MPH
         delta_mph = (float(row["Average Speed"]) - fastest) * KMH_TO_MPH
-        image = load_plot_image(headshots.get(name)) if mode == "Drivers" else load_plot_image(team_logo_source(team))
+        image = load_plot_image(headshots.get(name)) if mode == "Drivers" else load_team_plot_logo(team)
 
         if image is not None:
             ax.add_artist(AnnotationBbox(OffsetImage(image, zoom=zoom), (image_x, idx), frameon=False, zorder=10))
@@ -757,7 +773,7 @@ def corner_leaders_graphic(
         name = str(row[name_col])
         corner = str(row["Corner"])
         speed_mph = float(row["Minimum Speed"]) * KMH_TO_MPH
-        image = load_plot_image(headshots.get(name)) if mode == "Drivers" else load_plot_image(team_logo_source(team))
+        image = load_plot_image(headshots.get(name)) if mode == "Drivers" else load_team_plot_logo(team)
 
         if image is not None:
             ax.add_artist(AnnotationBbox(OffsetImage(image, zoom=zoom), (image_x, idx), frameon=False, zorder=10))
@@ -861,7 +877,7 @@ def straight_ranking_graphic(
         avg_mph = float(row["Straight Avg Speed"]) * KMH_TO_MPH
         trap_mph = float(row["Speed Trap"]) * KMH_TO_MPH if "Speed Trap" in row and pd.notna(row["Speed Trap"]) else np.nan
         delta_mph = (float(row["Straight Avg Speed"]) - fastest) * KMH_TO_MPH
-        image = load_plot_image(headshots.get(name)) if mode == "Drivers" else load_plot_image(team_logo_source(team))
+        image = load_plot_image(headshots.get(name)) if mode == "Drivers" else load_team_plot_logo(team)
 
         if image is not None:
             ax.add_artist(AnnotationBbox(OffsetImage(image, zoom=zoom), (image_x, idx), frameon=False, zorder=10))
@@ -1351,7 +1367,7 @@ def f1_pit_crews_graphic(data: pd.DataFrame, year: int, top_n: int = 10):
 
     for idx, (_, row) in enumerate(plot.iterrows()):
         team = str(row["Team"])
-        image = load_plot_image(team_logo_source(team))
+        image = load_team_plot_logo(team)
         if image is not None:
             ax.add_artist(AnnotationBbox(OffsetImage(image, zoom=0.18), (image_x, idx), frameon=False, zorder=10))
         else:
@@ -1402,7 +1418,7 @@ def standings_graphic(data: pd.DataFrame, mode: str, year: int, through_round: i
         team = str(row["Team"])
         points = float(row["Points"])
         gap = leader - points
-        image = load_plot_image(row.get("Logo"))
+        image = load_plot_image(row.get("Logo")) if mode == "Drivers" else load_team_plot_logo(team)
         if image is not None:
             ax.add_artist(AnnotationBbox(OffsetImage(image, zoom=0.18), (image_x, idx), frameon=False, zorder=10))
         else:
@@ -1641,6 +1657,19 @@ def team_wiki_title(team: str) -> str | None:
     return None
 
 
+def team_base_logo_file(team: str) -> tuple[str, str] | None:
+    normalized = str(team).casefold()
+    for key, source in TEAM_BASE_LOGO_FILES.items():
+        if key in normalized:
+            return source
+    return None
+
+
+def wikimedia_file_url(project: str, file_name: str, width: int = 320) -> str:
+    host = "en.wikipedia.org" if project == "en" else "commons.wikimedia.org"
+    return f"https://{host}/wiki/Special:Redirect/file/{quote(file_name)}?width={width}"
+
+
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24 * 7)
 def wiki_team_logo_url(team: str) -> str | None:
     title = team_wiki_title(team)
@@ -1660,7 +1689,20 @@ def wiki_team_logo_url(team: str) -> str | None:
 
 
 def team_logo_source(team: str) -> str | Path | None:
-    return team_logo_path(team) or wiki_team_logo_url(team)
+    local_logo = team_logo_path(team)
+    if local_logo is not None:
+        return local_logo
+    base_logo = team_base_logo_file(team)
+    if base_logo is not None:
+        return wikimedia_file_url(*base_logo)
+    return wiki_team_logo_url(team)
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24 * 7)
+def load_remote_image_bytes(source: str) -> bytes:
+    request = Request(source, headers={"User-Agent": "F1SessionIntelligence/1.0"})
+    with urlopen(request, timeout=8) as response:
+        return response.read()
 
 
 def load_plot_image(source: str | Path | None) -> np.ndarray | None:
@@ -1673,11 +1715,45 @@ def load_plot_image(source: str | Path | None) -> np.ndarray | None:
             encoded = str(source).split(",", 1)[1]
             image = Image.open(BytesIO(base64.b64decode(encoded)))
         else:
-            with urlopen(source, timeout=5) as response:
-                image = Image.open(BytesIO(response.read()))
+            try:
+                image_bytes = load_remote_image_bytes(str(source))
+            except Exception:
+                return None
+            image = Image.open(BytesIO(image_bytes))
         return np.asarray(image.convert("RGBA"))
     except Exception:
         return None
+
+
+def contained_logo_image(image: np.ndarray, size: int = 96, padding: int = 14) -> np.ndarray:
+    logo = Image.fromarray(image).convert("RGBA")
+    alpha_bbox = logo.getchannel("A").getbbox()
+    if alpha_bbox is not None:
+        logo = logo.crop(alpha_bbox)
+
+    max_size = max(size - padding * 2, 1)
+    logo.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle(
+        (6, 6, size - 6, size - 6),
+        radius=16,
+        fill=(248, 250, 252, 232),
+        outline=(215, 222, 232, 220),
+        width=2,
+    )
+    x = (size - logo.width) // 2
+    y = (size - logo.height) // 2
+    canvas.alpha_composite(logo, (x, y))
+    return np.asarray(canvas)
+
+
+def load_team_plot_logo(team: str) -> np.ndarray | None:
+    image = load_plot_image(team_logo_source(team))
+    if image is None:
+        return None
+    return contained_logo_image(image)
 
 
 def image_file_data_uri(path: Path | None) -> str | None:
@@ -1861,7 +1937,7 @@ def qualifying_delta_bar_chart(
         team = str(row["GroupTeam"])
         name = str(row["Name"])
         x_position = max(float(row["DeltaSeconds"]) * 0.52, max_delta * 0.035)
-        image = load_plot_image(team_logo_source(team)) if grouping == "Teams" else load_plot_image(headshots.get(name))
+        image = load_team_plot_logo(team) if grouping == "Teams" else load_plot_image(headshots.get(name))
         if image is not None:
             ax.add_artist(AnnotationBbox(OffsetImage(image, zoom=zoom), (x_position, idx), frameon=False, zorder=10))
         else:
@@ -1934,7 +2010,7 @@ def delta_box_plot(data: pd.DataFrame, title: str, grouping: str, headshots: dic
         median = float(group["LapTime (s)"].median())
         image = None
         if grouping == "Teams":
-            image = load_plot_image(team_logo_source(team))
+            image = load_team_plot_logo(team)
         else:
             image = load_plot_image(headshots.get(str(name)))
 
